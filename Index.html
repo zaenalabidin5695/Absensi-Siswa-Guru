@@ -26,6 +26,9 @@
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700&display=swap');
         body { font-family: 'Plus Jakarta Sans', sans-serif; -webkit-tap-highlight-color: transparent; }
         .active-tab { color: #2563eb; }
+        /* Fix for camera container on some mobile browsers */
+        #reader { width: 100% !important; border: none !important; }
+        #reader video { border-radius: 1rem; object-fit: cover !important; }
     </style>
 </head>
 <body class="bg-slate-50 min-h-screen pb-20">
@@ -84,8 +87,11 @@
         <!-- Scanner -->
         <main id="view-scan" class="hidden p-6">
             <div class="bg-white p-4 rounded-3xl border shadow-xl">
-                <div id="reader" class="rounded-2xl overflow-hidden bg-black"></div>
+                <div id="reader" class="rounded-2xl overflow-hidden bg-slate-900"></div>
                 <div id="scan-res" class="mt-4 p-4 bg-green-50 text-green-700 rounded-xl hidden text-center font-bold text-sm"></div>
+                <div id="camera-error" class="mt-4 p-4 bg-red-50 text-red-600 rounded-xl hidden text-center text-xs">
+                    Gagal mengakses kamera. Pastikan izin kamera diberikan dan situs menggunakan HTTPS.
+                </div>
             </div>
         </main>
 
@@ -122,10 +128,10 @@
     <script>
         const KEY = "SECRET_ABSENSI_KEY";
         let db = JSON.parse(localStorage.getItem('absensi_v2')) || { students: [], attendance: [] };
-        let scanner = null;
+        let html5QrCode = null;
         let deferredPrompt = null;
 
-        // Mendengarkan event instalasi PWA
+        // PWA Installation Support
         window.addEventListener('beforeinstallprompt', (e) => {
             e.preventDefault();
             deferredPrompt = e;
@@ -145,7 +151,6 @@
         function login() {
             const u = document.getElementById('user').value;
             const p = document.getElementById('pass').value;
-            // Bypass sederhana untuk admin
             if((u === 'admin' && p === 'admin123') || (u === '' && p === '')) {
                 document.getElementById('login-page').style.display = 'none';
                 document.getElementById('app-content').classList.remove('hidden');
@@ -173,13 +178,14 @@
             document.getElementById(`view-${v}`).classList.remove('hidden');
             
             ['home', 'scan', 'students'].forEach(b => {
-                document.getElementById(`nav-${b}`).classList.remove('active-tab');
-                document.getElementById(`nav-${b}`).classList.add('text-slate-400');
+                const btn = document.getElementById(`nav-${b}`);
+                btn.classList.remove('active-tab');
+                btn.classList.add('text-slate-400');
             });
             document.getElementById(`nav-${v}`).classList.add('active-tab');
             
             if(v === 'scan') {
-                startScan();
+                setTimeout(startScan, 100); // Slight delay for DOM rendering
             } else {
                 stopScan();
             }
@@ -192,7 +198,8 @@
         function decrypt(cipher) {
             try {
                 const bytes = CryptoJS.AES.decrypt(cipher, KEY);
-                return JSON.parse(bytes.toString(CryptoJS.enc.Utf8));
+                const decryptedText = bytes.toString(CryptoJS.enc.Utf8);
+                return decryptedText ? JSON.parse(decryptedText) : null;
             } catch(e) { return null; }
         }
 
@@ -212,7 +219,7 @@
         function renderStudents() {
             const list = document.getElementById('student-list');
             list.innerHTML = db.students.map(s => `
-                <div class="bg-white p-4 rounded-2xl border flex items-center gap-4 animate-in fade-in duration-500">
+                <div class="bg-white p-4 rounded-2xl border flex items-center gap-4">
                     <div id="qr-${s.id}" class="bg-white p-1 border rounded-lg shrink-0"></div>
                     <div class="overflow-hidden w-full">
                         <p class="font-bold text-sm truncate">${s.name}</p>
@@ -225,7 +232,7 @@
             db.students.forEach(s => {
                 const qrContainer = document.getElementById(`qr-${s.id}`);
                 if (qrContainer) {
-                    qrContainer.innerHTML = ''; // Bersihkan sebelum render ulang
+                    qrContainer.innerHTML = '';
                     new QRCode(qrContainer, { 
                         text: encrypt(s.nis), 
                         width: 64, 
@@ -245,36 +252,41 @@
             }
         }
 
-        function startScan() {
-            if (!scanner) {
-                scanner = new Html5Qrcode("reader");
-            }
+        async function startScan() {
+            const errorDiv = document.getElementById('camera-error');
+            errorDiv.classList.add('hidden');
             
-            scanner.start(
-                { facingMode: "environment" }, 
-                { fps: 15, qrbox: { width: 250, height: 250 } }, 
-                (text) => {
-                    const data = decrypt(text);
-                    if(data) {
-                        const s = db.students.find(x => x.nis === data.nis);
-                        if(s) {
-                            record(s);
-                        } else {
-                            console.log("NIS tidak terdaftar");
+            try {
+                if (!html5QrCode) {
+                    html5QrCode = new Html5Qrcode("reader");
+                }
+                
+                const config = { fps: 10, qrbox: { width: 250, height: 250 } };
+                
+                await html5QrCode.start(
+                    { facingMode: "environment" }, 
+                    config, 
+                    (decodedText) => {
+                        const data = decrypt(decodedText);
+                        if(data) {
+                            const s = db.students.find(x => x.nis === data.nis);
+                            if(s) record(s);
                         }
                     }
-                }
-            ).catch(e => {
-                console.error("Gagal memulai kamera:", e);
-                alert("Mohon izinkan akses kamera untuk melakukan scan.");
-            });
+                );
+            } catch (err) {
+                console.error("Camera Error:", err);
+                errorDiv.classList.remove('hidden');
+            }
         }
 
-        function stopScan() { 
-            if(scanner && scanner.isScanning) { 
-                scanner.stop().then(() => {
-                    scanner.clear();
-                }).catch(err => console.error(err)); 
+        async function stopScan() { 
+            if(html5QrCode && html5QrCode.isScanning) { 
+                try {
+                    await html5QrCode.stop();
+                } catch (err) {
+                    console.error("Stop Scan Error:", err);
+                }
             } 
         }
 
@@ -282,29 +294,27 @@
             const today = new Date().toDateString();
             const isAlreadyPresent = db.attendance.find(a => a.nis === s.nis && new Date(a.raw).toDateString() === today);
             
+            const res = document.getElementById('scan-res');
+            res.classList.remove('hidden');
+
             if(isAlreadyPresent) {
-                const res = document.getElementById('scan-res');
                 res.innerText = `${s.name} sudah absen hari ini`;
                 res.className = "mt-4 p-4 bg-amber-50 text-amber-700 rounded-xl block text-center font-bold text-sm";
-                setTimeout(() => res.className = "hidden", 3000);
-                return;
+            } else {
+                db.attendance.unshift({ 
+                    name: s.name, 
+                    nis: s.nis, 
+                    time: new Date().toLocaleTimeString('id-ID', {hour:'2-digit', minute:'2-digit'}),
+                    raw: Date.now()
+                });
+                save(); 
+                renderLogs(); 
+                updateStats();
+                res.innerText = `BERHASIL: ${s.name} hadir!`;
+                res.className = "mt-4 p-4 bg-green-50 text-green-700 rounded-xl block text-center font-bold text-sm";
             }
 
-            db.attendance.unshift({ 
-                name: s.name, 
-                nis: s.nis, 
-                time: new Date().toLocaleTimeString('id-ID', {hour:'2-digit', minute:'2-digit'}),
-                raw: Date.now()
-            });
-            
-            save(); 
-            renderLogs(); 
-            updateStats();
-            
-            const res = document.getElementById('scan-res');
-            res.innerText = `BERHASIL: ${s.name} hadir!`;
-            res.className = "mt-4 p-4 bg-green-50 text-green-700 rounded-xl block text-center font-bold text-sm";
-            setTimeout(() => res.className = "hidden", 3000);
+            setTimeout(() => res.classList.add('hidden'), 3000);
         }
 
         function renderLogs() {
@@ -335,9 +345,6 @@
         function save() { 
             localStorage.setItem('absensi_v2', JSON.stringify(db)); 
         }
-
-        // Penghapusan Service Worker berbasis Blob karena tidak didukung oleh browser untuk registrasi
-        // PWA tetap bisa diinstal melalui manifest data URI dan meta tags di atas.
     </script>
 </body>
 </html>
